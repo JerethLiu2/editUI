@@ -102,7 +102,7 @@ def scribble_edit_sdedit(
     negative_prompt="",
     num_inference_steps=50,
     seed=42,
-    edit_strength=0.5,
+    edit_strength=0.6,
     controlnet_conditioning_scale=2.5,
     guidance_scale=12.0
 ):
@@ -204,11 +204,12 @@ def scribble_edit_sdedit(
         padding=padding
     ).squeeze()
     
-    # SDEdit: compute starting timestep and inject noise once (correct indexing)
+    # SDEdit: compute starting timestep and inject noise once (INVERTED for proper mapping)
     pipe.scheduler.set_timesteps(num_inference_steps, device=pipe.device)
     timesteps = pipe.scheduler.timesteps
-    t_start_idx = int(edit_strength * len(timesteps))
-    t_start_idx = max(1, min(t_start_idx, len(timesteps) - 1))  # Clamp to valid range
+    # Invert: strength 1.0 = start at beginning (index 0), strength 0.0 = start at end
+    t_start_idx = int((1.0 - edit_strength) * (len(timesteps) - 1))
+    t_start_idx = max(0, min(t_start_idx, len(timesteps) - 1))  # Clamp to [0, len-1]
     
     # Log mask coverage and adjust if needed
     mask_coverage = edit_mask.mean().item()
@@ -235,12 +236,12 @@ def scribble_edit_sdedit(
         generator = torch.Generator(device=pipe.device)
         generator.manual_seed(edit_seed)  # Use random edit seed for varied noise patterns
         noise = torch.randn(latents.shape, generator=generator, device=pipe.device, dtype=torch.float16)
-        # Use the starting timestep from the original schedule
-        t_start = timesteps[t_start_idx]
-        latents = pipe.scheduler.add_noise(latents, noise, t_start)
-        print(f"SDEdit: injecting noise at timestep {t_start} (step {t_start_idx}/{len(timesteps)}) with random noise seed {edit_seed}")
         # Use timesteps from start index forward
         timesteps = timesteps[t_start_idx:]
+        # Use the first timestep from our sliced schedule
+        t_start = timesteps[0]
+        latents = pipe.scheduler.add_noise(latents, noise, t_start)
+        print(f"SDEdit: injecting noise at timestep {t_start} (step {t_start_idx}/{len(pipe.scheduler.timesteps)}) with random noise seed {edit_seed}")
     
     # Set random seed globally for generation process (varied results)
     torch.manual_seed(edit_seed)
@@ -526,13 +527,14 @@ def edit_add():
         guidance_scale = 8.0  # Reduced CFG to minimize artifacts
         
         # SDEdit approach: small strength, single noise injection, latent masking
-        edit_strength = 0.5  # Higher strength for significant edits
+        edit_strength = 0.6  # Moderate strength for balanced edits
         
-        # Compute starting timestep for SDEdit (correct indexing)
+        # Compute starting timestep for SDEdit (INVERTED for proper mapping)
         pipe.scheduler.set_timesteps(num_inference_steps, device=pipe.device)
         timesteps = pipe.scheduler.timesteps
-        t_start_idx = int(edit_strength * len(timesteps))
-        t_start_idx = max(1, min(t_start_idx, len(timesteps) - 1))  # Clamp to valid range
+        # Invert: strength 1.0 = start at beginning (index 0), strength 0.0 = start at end
+        t_start_idx = int((1.0 - edit_strength) * (len(timesteps) - 1))
+        t_start_idx = max(0, min(t_start_idx, len(timesteps) - 1))  # Clamp to [0, len-1]
         timesteps = timesteps[t_start_idx:]
         
         # Create latent-resolution mask for blending
@@ -565,6 +567,9 @@ def edit_add():
         # Invert mask (1 = edit region, 0 = preserve region)
         edit_mask = 1.0 - mask_latent
         
+        # Clamp mask to [0,1] range after smoothing
+        edit_mask = torch.clamp(edit_mask, 0.0, 1.0)
+        
         # Log mask coverage for debugging
         mask_coverage = edit_mask.mean().item()
         print(f"Edit mask coverage: {mask_coverage:.2%} of latent space")
@@ -575,8 +580,8 @@ def edit_add():
             generator = torch.Generator(device=pipe.device)
             generator.manual_seed(edit_seed)  # Use random edit seed for varied noise patterns
             noise = torch.randn(latents.shape, generator=generator, device=pipe.device, dtype=torch.float16)
-            # Use the starting timestep from the original schedule
-            t_start = pipe.scheduler.timesteps[t_start_idx]
+            # Use the first timestep from our sliced schedule
+            t_start = timesteps[0]
             latents = pipe.scheduler.add_noise(latents, noise, t_start)
             print(f"SDEdit: injecting noise at timestep {t_start} (step {t_start_idx}/{len(pipe.scheduler.timesteps)}) with random noise seed {edit_seed}")
         
@@ -674,7 +679,7 @@ def edit_scribble():
             negative_prompt=negative_prompt,
             num_inference_steps=num_inference_steps,
             seed=seed,
-            edit_strength=0.5,  # Higher strength for significant edits
+            edit_strength=0.6,  # Moderate strength for balanced edits
             controlnet_conditioning_scale=2.5,
             guidance_scale=8.0  # Reduced CFG to minimize artifacts
         )
