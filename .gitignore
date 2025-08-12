@@ -1,0 +1,18 @@
+﻿# Node
+image-editor-ui/node_modules/
+image-editor-ui/.next/
+image-editor-ui/dist/
+image-editor-ui/build/
+
+# Python
+**/__pycache__/
+**/.pytest_cache/
+**/*.pyc
+**/.venv/
+**/venv/
+
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

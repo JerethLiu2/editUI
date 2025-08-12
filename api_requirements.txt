@@ -1,0 +1,28 @@
+# Flask API requirements - EXACT same versions as main project requirements.txt
+# Requires Python 3.10
+flask==3.0.3
+flask-cors==4.0.1
+
+# EXACT versions from your working requirements.txt
+torch==2.1.1
+transformers==4.39.3
+diffusers==0.21.1
+torchvision==0.16.1
+torchaudio==2.1.1
+accelerate>=0.18.0,<0.25.0
+scikit-image
+tqdm
+numpy<2.0.0
+pillow
+matplotlib
+scipy
+einops
+xformers
+safetensors
+pyyaml
+ipython
+omegaconf
+opencv-python
+tensorboard
+huggingface_hub<0.26.0
+scikit-learn
