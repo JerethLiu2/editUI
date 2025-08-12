@@ -170,39 +170,60 @@ def scribble_edit_sdedit(
     
     print(f"Control image stats: min={control_image.min():.3f}, max={control_image.max():.3f}, unique_vals={torch.unique(control_image).numel()}")
     
-    # Create latent-resolution mask from scribble
+    # Create latent-resolution mask from scribble using two-band approach
+    from scipy.ndimage import binary_erosion, gaussian_filter
+    
     scribble_array = np.array(scribble_image.convert('L'))
     edges = cv2.Canny(scribble_array, 10, 50)
     
     if edges.sum() == 0:
         _, edges = cv2.threshold(255 - scribble_array, 10, 255, cv2.THRESH_BINARY)
     
-    # Create scribble mask with dilation and fill
-    scribble_mask_2d = (edges > 0).astype(np.float32)
-    scribble_mask_2d = binary_dilation(scribble_mask_2d, iterations=15).astype(np.float32)
-    scribble_mask_2d = binary_fill_holes(scribble_mask_2d).astype(np.float32)
+    # Initial mask from edges
+    initial_mask = (edges > 0).astype(np.float32)
+    initial_mask = binary_dilation(initial_mask, iterations=10).astype(np.float32)
+    initial_mask = binary_fill_holes(initial_mask).astype(np.float32)
     
-    # Convert to latent resolution with smoothing
+    # Convert to latent resolution first
     latent_h, latent_w = init_latent.shape[2], init_latent.shape[3]
-    scribble_mask = torch.from_numpy(scribble_mask_2d).to(pipe.device)
-    
-    # Resize and smooth mask
+    initial_mask_tensor = torch.from_numpy(initial_mask).to(pipe.device)
     mask_latent = F.interpolate(
-        scribble_mask.unsqueeze(0).unsqueeze(0), 
+        initial_mask_tensor.unsqueeze(0).unsqueeze(0), 
         size=(latent_h, latent_w), 
-        mode='bilinear', 
-        align_corners=False
+        mode='nearest'  # Use nearest for binary mask
     ).squeeze()
     
-    # Smooth boundaries
-    kernel_size = 5
-    padding = kernel_size // 2
-    smooth_kernel = torch.ones(1, 1, kernel_size, kernel_size, device=pipe.device) / (kernel_size * kernel_size)
-    edit_mask = F.conv2d(
-        mask_latent.unsqueeze(0).unsqueeze(0), 
-        smooth_kernel, 
-        padding=padding
-    ).squeeze()
+    # Convert to numpy for morphological operations in latent space
+    mask_latent_np = mask_latent.cpu().numpy()
+    
+    # Two-band mask creation in latent space
+    # 1. Create core by eroding by 1 latent pixel
+    from scipy.ndimage import binary_erosion as scipy_erosion
+    core_mask = scipy_erosion(mask_latent_np > 0.5, iterations=1).astype(np.float32)
+    
+    # 2. Create feather ring by dilating core by +3 latent pixels
+    feather_mask = binary_dilation(core_mask, iterations=3).astype(np.float32)
+    
+    # 3. Apply Gaussian blur to create soft transition
+    # Kernel 7x7, sigma ~1.2 in latent units
+    soft_mask = gaussian_filter(feather_mask, sigma=1.2)
+    
+    # 4. Convert back to tensor and ensure core stays at 100%
+    edit_mask = torch.from_numpy(soft_mask).to(pipe.device, dtype=torch.float32)
+    core_mask_tensor = torch.from_numpy(core_mask).to(pipe.device, dtype=torch.float32)
+    
+    # Ensure core region stays at 100% (take maximum of blurred mask and core)
+    edit_mask = torch.maximum(edit_mask, core_mask_tensor)
+    
+    # Clamp to [0,1] range
+    edit_mask = torch.clamp(edit_mask, 0.0, 1.0)
+    
+    # Log mask characteristics
+    mask_coverage = edit_mask.mean().item()
+    core_coverage = (edit_mask > 0.9).float().mean().item()
+    transition_coverage = ((edit_mask > 0.1) & (edit_mask < 0.9)).float().mean().item()
+    
+    print(f"Two-band mask - Total coverage: {mask_coverage:.2%}, Core: {core_coverage:.2%}, Transition: {transition_coverage:.2%}")
     
     # SDEdit: compute starting timestep and inject noise once (INVERTED for proper mapping)
     pipe.scheduler.set_timesteps(num_inference_steps, device=pipe.device)
@@ -210,25 +231,6 @@ def scribble_edit_sdedit(
     # Invert: strength 1.0 = start at beginning (index 0), strength 0.0 = start at end
     t_start_idx = int((1.0 - edit_strength) * (len(timesteps) - 1))
     t_start_idx = max(0, min(t_start_idx, len(timesteps) - 1))  # Clamp to [0, len-1]
-    
-    # Log mask coverage and adjust if needed
-    mask_coverage = edit_mask.mean().item()
-    print(f"Scribble mask coverage: {mask_coverage:.2%} of latent space")
-    
-    # If mask is too small (<2%), dilate or warn
-    if mask_coverage < 0.02:
-        print(f"Warning: Mask coverage {mask_coverage:.2%} is very small, consider wider strokes")
-        # Optionally dilate the mask for better coverage
-        kernel_large = torch.ones(1, 1, 7, 7, device=pipe.device) / 49.0
-        edit_mask = F.conv2d(
-            edit_mask.unsqueeze(0).unsqueeze(0), 
-            kernel_large, 
-            padding=3
-        ).squeeze()
-        print(f"Dilated mask coverage: {edit_mask.mean().item():.2%}")
-    
-    # Clamp mask to [0,1] range
-    edit_mask = torch.clamp(edit_mask, 0.0, 1.0)
     
     # Single noise injection with random seed for variety
     latents = init_latent.clone()
@@ -250,6 +252,11 @@ def scribble_edit_sdedit(
     
     # Denoise with ControlNet and latent masking
     for i, t in enumerate(timesteps):
+        # Optional: Linear schedule for ControlNet conditioning scale
+        # Start at passed value, decrease by 25% over time
+        progress = i / max(1, len(timesteps) - 1)
+        current_control_scale = controlnet_conditioning_scale * (1.0 - 0.25 * progress)
+        
         # Expand latents for CFG
         latent_model_input = torch.cat([latents] * 2)
         latent_model_input = pipe.scheduler.scale_model_input(latent_model_input, t)
@@ -261,7 +268,7 @@ def scribble_edit_sdedit(
             t,
             encoder_hidden_states=text_embeddings.to(controlnet.dtype),
             controlnet_cond=control_batch.to(controlnet.dtype),
-            conditioning_scale=controlnet_conditioning_scale,
+            conditioning_scale=current_control_scale,  # Use scheduled scale
             return_dict=False,
         )
         
@@ -679,9 +686,9 @@ def edit_scribble():
             negative_prompt=negative_prompt,
             num_inference_steps=num_inference_steps,
             seed=seed,
-            edit_strength=0.6,  # Moderate strength for balanced edits
-            controlnet_conditioning_scale=2.5,
-            guidance_scale=8.0  # Reduced CFG to minimize artifacts
+            edit_strength=0.4,  # Lower strength for better color adherence
+            controlnet_conditioning_scale=1.2,  # Start value, will decrease by 25% over time
+            guidance_scale=10.0  # Higher CFG for stronger prompt adherence in scribble
         )
         
         # Store edited latent in FP32 on CPU for quality preservation and VRAM efficiency
