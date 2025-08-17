@@ -283,6 +283,13 @@ body {
   box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1);
 }
 
+.generation-buttons {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 .generate-btn {
   background-color: #3498db;
   color: white;
@@ -303,6 +310,31 @@ body {
 }
 
 .generate-btn:disabled {
+  background-color: #bdc3c7;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.upload-btn {
+  background-color: #27ae60;
+  color: white;
+  border: none;
+  padding: 12px 24px;
+  border-radius: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  min-width: 120px;
+}
+
+.upload-btn:hover:not(:disabled) {
+  background-color: #229954;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(39, 174, 96, 0.3);
+}
+
+.upload-btn:disabled {
   background-color: #bdc3c7;
   cursor: not-allowed;
   transform: none;

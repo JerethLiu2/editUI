@@ -26,10 +26,11 @@ function App() {
     editPreview: null
   });
   
-  const [prompt, setPrompt] = useState('anime girl with long hair');
+  const [prompt, setPrompt] = useState('A person wearing a white cotton t-shirt and blue jeans');
   const [mode, setMode] = useState<Mode>('none');
   const [isGenerating, setIsGenerating] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
   
   // Settings
   const [seed, setSeed] = useState(-1);
@@ -287,6 +288,54 @@ function App() {
       alert('Failed to generate image. Is the server running?');
     }
     setIsGenerating(false);
+  };
+
+  const uploadImage = async (file: File) => {
+    setIsUploading(true);
+    try {
+      // Convert file to base64
+      const base64 = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result as string;
+          resolve(result.split(',')[1]); // Remove data:image/... prefix
+        };
+        reader.readAsDataURL(file);
+      });
+
+      const response = await axios.post(`${API_BASE}/upload_image`, {
+        image: base64,
+        prompt,
+        session_id: session.sessionId || undefined,
+        nti_iterations: 100
+      });
+      
+      if (response.data.success) {
+        setSession({
+          sessionId: response.data.session_id,
+          currentImage: response.data.image,
+          editPreview: null
+        });
+        console.log('NTI metadata:', response.data.nti_metadata);
+      } else {
+        alert('Error uploading image: ' + response.data.error);
+      }
+    } catch (error) {
+      console.error('Upload error:', error);
+      alert('Failed to upload image. Is the server running?');
+    }
+    setIsUploading(false);
+  };
+
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      if (file.type.startsWith('image/')) {
+        uploadImage(file);
+      } else {
+        alert('Please select an image file');
+      }
+    }
   };
 
   const executeEdit = async () => {
@@ -599,16 +648,35 @@ function App() {
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               className="prompt-input"
-              placeholder="Enter your prompt..."
+              placeholder="Describe the person and their clothing..."
               rows={4}
             />
-            <button 
-              onClick={generateImage}
-              disabled={isGenerating}
-              className="generate-btn"
-            >
-              {isGenerating ? 'Generating...' : 'Generate'}
-            </button>
+            <div className="generation-buttons">
+              <button 
+                onClick={generateImage}
+                disabled={isGenerating || isUploading}
+                className="generate-btn"
+              >
+                {isGenerating ? 'Generating...' : 'Generate'}
+              </button>
+              <div className="upload-section">
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handleFileUpload}
+                  disabled={isGenerating || isUploading}
+                  id="image-upload"
+                  style={{ display: 'none' }}
+                />
+                <button
+                  onClick={() => document.getElementById('image-upload')?.click()}
+                  disabled={isGenerating || isUploading}
+                  className="upload-btn"
+                >
+                  {isUploading ? 'Processing...' : 'Upload Image'}
+                </button>
+              </div>
+            </div>
           </div>
 
           {/* Generation Settings */}
@@ -660,7 +728,7 @@ function App() {
                 type="text"
                 value={addPrompt}
                 onChange={(e) => setAddPrompt(e.target.value)}
-                placeholder="What to add..."
+                placeholder="What garment/accessory to add (e.g., 'red scarf', 'leather jacket')..."
                 className="add-prompt-input"
               />
               <button
@@ -679,7 +747,7 @@ function App() {
                 type="text"
                 value={scribblePrompt}
                 onChange={(e) => setScribblePrompt(e.target.value)}
-                placeholder="What should the scribble become..."
+                placeholder="What garment change to make (e.g., 'change shirt to silk', 'make jeans ripped')..."
                 className="scribble-prompt-input"
               />
               <button

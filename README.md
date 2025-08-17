@@ -1,6 +1,6 @@
-# Image Editor UI
+# Iterative Garment Editor
 
-An interactive web interface for the image editing system with scribble and add modes.
+An interactive web interface for AI-powered garment editing with precision tools for modifying clothing, materials, colors, and styles.
 
 ## Architecture
 
@@ -18,8 +18,8 @@ This project consists of two parts:
 5. **Settings Panel**: Adjust generation parameters like seed, steps, and brush size
 
 ### Editing Modes
-- **Add Mode**: Draw bounding box and specify what to add to that region
-- **Scribble Mode**: Draw rough sketches that get transformed into detailed additions (like hair ribbons)
+- **Add Mode**: Draw regions on garments and specify what to add (e.g., accessories, layers, details)
+- **Scribble Mode**: Draw on existing garments to transform them (e.g., change textures, patterns, colors, or styles)
 
 ## Setup Instructions
 
@@ -70,21 +70,21 @@ The UI will open at `http://localhost:3000`
 ## Usage Guide
 
 ### Getting Started
-1. Enter a prompt (e.g., "anime girl with long hair") and click **Generate**
+1. Enter a prompt describing a person and their clothing (e.g., "A person wearing a white cotton t-shirt and blue jeans") and click **Generate**
 2. Wait for the base image to appear in the left box
-3. Choose your editing mode and start editing!
+3. Choose your editing mode and start modifying the garments!
 
 ### Add Mode
-1. Click **Add Mode** to enable bounding box selection
-2. Draw a rectangle on the image where you want to add something
-3. Enter what you want to add (e.g., "butterfly", "flower")
+1. Click **Add Mode** to enable region selection
+2. Draw on the image where you want to add garments or accessories
+3. Enter what you want to add (e.g., "red scarf", "leather jacket", "silver watch")
 4. Click **Add** and wait for the preview
 5. **Accept** or **Reject** the edit
 
 ### Scribble Mode  
 1. Click **Scribble Mode** to enable drawing
-2. Draw a rough sketch on the image
-3. Enter what the scribble should become (e.g., "pink hair ribbon")
+2. Draw on the garment you want to modify
+3. Enter the desired change (e.g., "change shirt to silk texture", "make jeans ripped", "add floral pattern")
 4. Adjust brush size if needed using the slider in the top bar
 5. Click **Apply** and wait for the preview
 6. **Accept** or **Reject** the edit
@@ -102,30 +102,30 @@ The Flask backend provides these endpoints:
 Generate a new base image
 ```json
 {
-  "prompt": "anime girl with long hair",
+  "prompt": "A person wearing a white cotton t-shirt and blue jeans",
   "seed": 42,
   "num_inference_steps": 50
 }
 ```
 
 ### `POST /api/edit/add`
-Add elements using bounding box
+Add garments or accessories using drawn regions
 ```json
 {
   "session_id": "uuid",
-  "box": [x0, y0, x1, y1],
-  "add_prompt": "butterfly",
+  "add_image": "base64_drawn_region",
+  "add_prompt": "red leather jacket",
   "num_inference_steps": 50
 }
 ```
 
 ### `POST /api/edit/scribble`
-Edit using scribble drawing
+Edit garments using scribble drawing
 ```json
 {
   "session_id": "uuid",
   "scribble_image": "base64_image_data",
-  "scribble_prompt": "pink hair ribbon",
+  "scribble_prompt": "change shirt to denim texture",
   "num_inference_steps": 50
 }
 ```
@@ -210,4 +210,4 @@ To modify the backend:
 
 ## Credits
 
-Built on top of the InstDiffEdit and ControlNet image editing system with hybrid attention masking for precise, localized edits.
+Built on top of Stable Diffusion 1.5, InstDiffEdit and ControlNet with hybrid attention masking for precise garment editing and style transfer.

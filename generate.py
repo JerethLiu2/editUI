@@ -232,7 +232,7 @@ parser.add_argument('--width', type=int, default=512, help='The width for pipe')
 parser.add_argument('--path', type=str, default="./")
 
 
-parser.add_argument('--prompt', type=str, default="Photo of a cow seating in the forest.")
+parser.add_argument('--prompt', type=str, default="A person wearing a white cotton t-shirt and blue jeans")
 parser.add_argument('--seed', type=int, default=-1, help='Seed for generation (-1 for random)')
 
 parser.add_argument('--1', type=int, default=56775)
@@ -249,7 +249,7 @@ args = parser.parse_args()
 #     "~/.cache/huggingface/hub/models--runwayml--stable-diffusion-v1-5"
 #     "/snapshots/451f4fe16113bff5a5d2269ed5ad43b0592e9a14"
 # )
-model_id = "admruul/anything-v3.0"
+model_id = "runwayml/stable-diffusion-v1-5"
 device="cuda"
 
 # Use DiffusionPipeline for the anime model
@@ -270,7 +270,7 @@ else:
     seed = args.seed
 
 generator = torch.manual_seed(seed)
-negative_prompt = "monocolor, monotony, cartoon style, many texts, pure cloud, pure sea, extra texts, texts, monochrome, flattened, lowres, longbody, bad anatomy, bad hands, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality"
+negative_prompt = "blurry, low quality, bad anatomy, bad hands, missing fingers, extra digits, cropped, worst quality, low resolution, text, watermark"
 
 
 input_params = {
@@ -419,9 +419,6 @@ if (args.box or args.add_image) and args.add_prompt:
     print(f"Original prompt: '{prompt}'")
     if args.add_prompt:
         print(f"Add prompt: '{args.add_prompt}'")
-        # For anime models, show both comma-separated tags and actual tokens
-        add_tags = [tag.strip() for tag in args.add_prompt.split(',')]
-        print(f"Add tags (comma-separated): {add_tags}")
         add_tokens = pipe.tokenizer.tokenize(args.add_prompt)
         print(f"Add tokens (tokenizer): {add_tokens}")
     print("=== END TOKEN ANALYSIS ===\n")
@@ -495,9 +492,6 @@ if (args.box or args.add_image) and args.add_prompt:
         # DEBUG: Show exact token positions for visualization
         add_tokens = pipe.tokenizer.convert_ids_to_tokens(add_input.input_ids[0])
         print("=== ADD PROMPT TOKEN POSITIONS ===")
-        # For anime models, highlight where comma-separated tags map to tokens
-        tags = [tag.strip() for tag in args.add_prompt.split(',')]
-        print(f"Original tags: {tags}")
         for i, token in enumerate(add_tokens[:10]):  # Show first 10 tokens
             print(f"Token {i}: '{token}'")
         print("=== END TOKEN POSITIONS ===")
@@ -518,7 +512,7 @@ if (args.box or args.add_image) and args.add_prompt:
             uncond_embeddings = pipe.text_encoder(uncond_input.input_ids)[0]
         
         text_embeddings = torch.cat([uncond_embeddings, add_embeddings])
-        guidance_scale = 12.0  # Higher CFG for anime models
+        guidance_scale = 7.5  # Standard CFG for SD1.5
         
         # Initialize step tracker (scheduler already set above)
         denoising_tracker.reset(args.num_inference_steps)

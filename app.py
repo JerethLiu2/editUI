@@ -24,6 +24,7 @@ from models.replacement import my_attn_processor2
 from utils.frame import Frame
 from utils.ptp_utils import fill_tensor
 from utils.vis_utils import save_images
+from nti_module import process_nti
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -93,6 +94,10 @@ def reset_attention_processors(pipe):
         attn_procs[name] = default_attn_proc
     pipe.unet.set_attn_processor(attn_procs)
 
+def get_execution_device():
+    """Get the actual execution device for CPU-offloaded pipeline."""
+    return getattr(pipe, "_execution_device", torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+
 def scribble_edit_sdedit(
     pipe,
     controlnet,
@@ -104,7 +109,8 @@ def scribble_edit_sdedit(
     seed=42,
     edit_strength=0.6,
     controlnet_conditioning_scale=2.5,
-    guidance_scale=12.0
+    guidance_scale=12.0,
+    exec_device=None
 ):
     """
     SDEdit-based scribble editing with minimal drift and latent masking.
@@ -113,6 +119,13 @@ def scribble_edit_sdedit(
     from scipy.ndimage import binary_dilation, binary_fill_holes
     import torch.nn.functional as F
     
+    # Get execution device if not provided
+    if exec_device is None:
+        exec_device = get_execution_device()
+    
+    # Ensure init_latent is on execution device with correct dtype
+    init_latent = init_latent.to(exec_device, dtype=torch.float16)
+    
     # Prepare text embeddings
     text_input = pipe.tokenizer(
         [scribble_prompt],
@@ -120,7 +133,7 @@ def scribble_edit_sdedit(
         max_length=pipe.tokenizer.model_max_length,
         truncation=True,
         return_tensors="pt"
-    ).to(pipe.device)
+    ).to(exec_device)
     
     with torch.no_grad():
         text_embeddings = pipe.text_encoder(text_input.input_ids)[0]
@@ -132,7 +145,7 @@ def scribble_edit_sdedit(
         max_length=pipe.tokenizer.model_max_length,
         truncation=True,
         return_tensors="pt"
-    ).to(pipe.device)
+    ).to(exec_device)
     
     with torch.no_grad():
         uncond_embeddings = pipe.text_encoder(uncond_input.input_ids)[0]
@@ -163,7 +176,7 @@ def scribble_edit_sdedit(
     control_rgb = cv2.cvtColor(control_binary, cv2.COLOR_GRAY2RGB)
     control_image = torch.from_numpy(control_rgb).float() / 255.0  # Normalize to [0,1]
     control_image = control_image.permute(2, 0, 1).unsqueeze(0)
-    control_image = control_image.to(pipe.device, dtype=torch.float16)
+    control_image = control_image.to(exec_device, dtype=torch.float16)
     
     # Create zero control image for uncond arm of CFG
     control_zeros = torch.zeros_like(control_image)
@@ -186,7 +199,7 @@ def scribble_edit_sdedit(
     
     # Convert to latent resolution first
     latent_h, latent_w = init_latent.shape[2], init_latent.shape[3]
-    initial_mask_tensor = torch.from_numpy(initial_mask).to(pipe.device)
+    initial_mask_tensor = torch.from_numpy(initial_mask).to(exec_device)
     mask_latent = F.interpolate(
         initial_mask_tensor.unsqueeze(0).unsqueeze(0), 
         size=(latent_h, latent_w), 
@@ -209,8 +222,8 @@ def scribble_edit_sdedit(
     soft_mask = gaussian_filter(feather_mask, sigma=1.2)
     
     # 4. Convert back to tensor and ensure core stays at 100%
-    edit_mask = torch.from_numpy(soft_mask).to(pipe.device, dtype=torch.float32)
-    core_mask_tensor = torch.from_numpy(core_mask).to(pipe.device, dtype=torch.float32)
+    edit_mask = torch.from_numpy(soft_mask).to(exec_device, dtype=torch.float32)
+    core_mask_tensor = torch.from_numpy(core_mask).to(exec_device, dtype=torch.float32)
     
     # Ensure core region stays at 100% (take maximum of blurred mask and core)
     edit_mask = torch.maximum(edit_mask, core_mask_tensor)
@@ -226,7 +239,7 @@ def scribble_edit_sdedit(
     print(f"Two-band mask - Total coverage: {mask_coverage:.2%}, Core: {core_coverage:.2%}, Transition: {transition_coverage:.2%}")
     
     # SDEdit: compute starting timestep and inject noise once (INVERTED for proper mapping)
-    pipe.scheduler.set_timesteps(num_inference_steps, device=pipe.device)
+    pipe.scheduler.set_timesteps(num_inference_steps, device=exec_device)
     timesteps = pipe.scheduler.timesteps
     # Invert: strength 1.0 = start at beginning (index 0), strength 0.0 = start at end
     t_start_idx = int((1.0 - edit_strength) * (len(timesteps) - 1))
@@ -235,9 +248,9 @@ def scribble_edit_sdedit(
     # Single noise injection with random seed for variety
     latents = init_latent.clone()
     if t_start_idx < len(timesteps):
-        generator = torch.Generator(device=pipe.device)
+        generator = torch.Generator(device=exec_device)
         generator.manual_seed(edit_seed)  # Use random edit seed for varied noise patterns
-        noise = torch.randn(latents.shape, generator=generator, device=pipe.device, dtype=torch.float16)
+        noise = torch.randn(latents.shape, generator=generator, device=exec_device, dtype=torch.float16)
         # Use timesteps from start index forward
         timesteps = timesteps[t_start_idx:]
         # Use the first timestep from our sliced schedule
@@ -300,12 +313,28 @@ def load_models():
     
     if pipe is None:
         print("Loading diffusion model...")
-        model_id = "admruul/anything-v3.0"
+        model_id = "runwayml/stable-diffusion-v1-5"
         pipe = DiffusionPipeline.from_pretrained(model_id, 
-            torch_dtype=torch.float16
-        ).to("cuda")
-        pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
-        pipe.safety_checker = lambda images, **kwargs: (images, [False] * len(images))
+            torch_dtype=torch.float16,
+            use_safetensors=True
+        )
+        # Use NTI-friendly scheduler configuration
+        pipe.scheduler = DPMSolverMultistepScheduler.from_config(
+            pipe.scheduler.config,
+            algorithm_type="dpmsolver++",
+            use_karras_sigmas=True
+        )
+        pipe.safety_checker = None
+        pipe.feature_extractor = None
+        
+        # Enable memory optimizations
+        pipe.enable_attention_slicing("max")
+        pipe.enable_vae_slicing()
+        pipe.unet.enable_gradient_checkpointing()
+        
+        # Enable CPU offloading
+        pipe.enable_model_cpu_offload()
+        
         print("Model loaded successfully!")
     
     if controlnet is None:
@@ -345,7 +374,7 @@ def generate_image():
         reset_attention_processors(pipe)
         
         data = request.json
-        prompt = data.get('prompt', 'anime girl with long hair')
+        prompt = data.get('prompt', 'A person wearing a white cotton t-shirt and blue jeans')
         seed = data.get('seed', -1)
         num_inference_steps = data.get('num_inference_steps', 50)
         session_id = data.get('session_id', str(uuid.uuid4()))
@@ -357,7 +386,7 @@ def generate_image():
             print(f"Generated random seed: {seed}")
         
         current_seed = seed
-        negative_prompt = "monocolor, monotony, cartoon style, many texts, pure cloud, pure sea, extra texts, texts, monochrome, flattened, lowres, longbody, bad anatomy, bad hands, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality"
+        negative_prompt = "blurry, low quality, bad anatomy, bad hands, missing fingers, extra digits, cropped, worst quality, low resolution, text, watermark"
         
         print(f"Generating image with prompt: {prompt}, seed: {seed}")
         
@@ -456,8 +485,11 @@ def edit_add():
         if session_id not in sessions or 'latent' not in sessions[session_id]:
             return jsonify({"success": False, "error": "No active session found"}), 400
         
-        # Move FP32 latent to GPU and convert to FP16 for inference
-        init_latent = sessions[session_id]['latent'].to(pipe.device).to(torch.float16)
+        # Get execution device for CPU offloading compatibility
+        exec_device = get_execution_device()
+        
+        # Move FP32 latent to execution device and convert to FP16 for inference
+        init_latent = sessions[session_id]['latent'].to(exec_device, torch.float16)
         seed = sessions[session_id].get('seed', 42)
         
         # Convert base64 add image to PIL image
@@ -506,7 +538,7 @@ def edit_add():
         init_model(pipe, add_prompt, simple_regional_guidance, masks)
         
         # Prepare embeddings
-        negative_prompt = "nsfw, text"
+        negative_prompt = "blurry, low quality, bad anatomy, bad hands, missing fingers, extra digits, cropped, worst quality, low resolution, text, watermark"
         
         add_input = pipe.tokenizer(
             [add_prompt],
@@ -514,7 +546,7 @@ def edit_add():
             max_length=pipe.tokenizer.model_max_length,
             truncation=True,
             return_tensors="pt"
-        ).to(pipe.device)
+        ).to(exec_device)
         
         with torch.no_grad():
             add_embeddings = pipe.text_encoder(add_input.input_ids)[0]
@@ -525,19 +557,19 @@ def edit_add():
             max_length=pipe.tokenizer.model_max_length,
             truncation=True,
             return_tensors="pt"
-        ).to(pipe.device)
+        ).to(exec_device)
         
         with torch.no_grad():
             uncond_embeddings = pipe.text_encoder(uncond_input.input_ids)[0]
         
         text_embeddings = torch.cat([uncond_embeddings, add_embeddings])
-        guidance_scale = 8.0  # Reduced CFG to minimize artifacts
+        guidance_scale = 9.0  # Reduced CFG to minimize artifacts while maintaining effectiveness
         
-        # SDEdit approach: small strength, single noise injection, latent masking
-        edit_strength = 0.6  # Moderate strength for balanced edits
+        # SDEdit approach: increased strength for more pronounced add mode edits
+        edit_strength = 0.8  # Higher strength for stronger add mode effects
         
         # Compute starting timestep for SDEdit (INVERTED for proper mapping)
-        pipe.scheduler.set_timesteps(num_inference_steps, device=pipe.device)
+        pipe.scheduler.set_timesteps(num_inference_steps, device=exec_device)
         timesteps = pipe.scheduler.timesteps
         # Invert: strength 1.0 = start at beginning (index 0), strength 0.0 = start at end
         t_start_idx = int((1.0 - edit_strength) * (len(timesteps) - 1))
@@ -546,7 +578,7 @@ def edit_add():
         
         # Create latent-resolution mask for blending
         latent_h, latent_w = init_latent.shape[2], init_latent.shape[3]
-        mask_latent = torch.zeros((latent_h, latent_w), device=pipe.device, dtype=torch.float32)
+        mask_latent = torch.zeros((latent_h, latent_w), device=exec_device, dtype=torch.float32)
         
         # Convert drawn region masks to latent resolution
         for scale, region_mask in masks.items():
@@ -563,7 +595,7 @@ def edit_add():
                 # Smooth the mask boundaries to avoid hard edges
                 kernel_size = 5
                 padding = kernel_size // 2
-                smooth_kernel = torch.ones(1, 1, kernel_size, kernel_size, device=pipe.device) / (kernel_size * kernel_size)
+                smooth_kernel = torch.ones(1, 1, kernel_size, kernel_size, device=exec_device) / (kernel_size * kernel_size)
                 mask_latent = F.conv2d(
                     mask_resized.unsqueeze(0).unsqueeze(0), 
                     smooth_kernel, 
@@ -584,9 +616,9 @@ def edit_add():
         # Single noise injection at computed timestep (use random seed for varied noise patterns)
         latents = init_latent.clone()
         if len(timesteps) > 0:
-            generator = torch.Generator(device=pipe.device)
+            generator = torch.Generator(device=exec_device)
             generator.manual_seed(edit_seed)  # Use random edit seed for varied noise patterns
-            noise = torch.randn(latents.shape, generator=generator, device=pipe.device, dtype=torch.float16)
+            noise = torch.randn(latents.shape, generator=generator, device=exec_device, dtype=torch.float16)
             # Use the first timestep from our sliced schedule
             t_start = timesteps[0]
             latents = pipe.scheduler.add_noise(latents, noise, t_start)
@@ -629,7 +661,7 @@ def edit_add():
         
         # Decode to image for preview (ensure proper dtype for VAE)
         with torch.no_grad():
-            arr = pipe.decode_latents(edited_latent.to(pipe.device).to(pipe.vae.dtype))[0]
+            arr = pipe.decode_latents(edited_latent.to(exec_device).to(pipe.vae.dtype))[0]
         arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
         img_np = (arr * 255.0).round().clip(0, 255).astype("uint8")
         edited_image = Image.fromarray(img_np)
@@ -665,8 +697,11 @@ def edit_scribble():
         if session_id not in sessions or 'latent' not in sessions[session_id]:
             return jsonify({"success": False, "error": "No active session found"}), 400
         
-        # Move FP32 latent to GPU and convert to FP16 for inference
-        init_latent = sessions[session_id]['latent'].to(pipe.device).to(torch.float16)
+        # Get execution device for CPU offloading compatibility
+        exec_device = get_execution_device()
+        
+        # Move FP32 latent to execution device and convert to FP16 for inference
+        init_latent = sessions[session_id]['latent'].to(exec_device, torch.float16)
         seed = sessions[session_id].get('seed', 42)
         
         # Convert base64 scribble to PIL image
@@ -674,7 +709,7 @@ def edit_scribble():
         
         print(f"Applying scribble edit with prompt: {scribble_prompt}")
         
-        negative_prompt = "monocolor, monotony, cartoon style, many texts, pure cloud, pure sea, extra texts, texts, monochrome, flattened, lowres, longbody, bad anatomy, bad hands, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality"
+        negative_prompt = "blurry, low quality, bad anatomy, bad hands, missing fingers, extra digits, cropped, worst quality, low resolution, text, watermark"
         
         # Run scribble edit with SDEdit approach (consistent with add mode)
         edited_latent = scribble_edit_sdedit(
@@ -688,7 +723,8 @@ def edit_scribble():
             seed=seed,
             edit_strength=0.4,  # Lower strength for better color adherence
             controlnet_conditioning_scale=1.2,  # Start value, will decrease by 25% over time
-            guidance_scale=10.0  # Higher CFG for stronger prompt adherence in scribble
+            guidance_scale=10.0,  # Higher CFG for stronger prompt adherence in scribble
+            exec_device=exec_device  # Pass execution device for consistency
         )
         
         # Store edited latent in FP32 on CPU for quality preservation and VRAM efficiency
@@ -696,7 +732,7 @@ def edit_scribble():
         
         # Decode to image for preview (ensure proper dtype for VAE)
         with torch.no_grad():
-            arr = pipe.decode_latents(edited_latent.to(pipe.device).to(pipe.vae.dtype))[0]
+            arr = pipe.decode_latents(edited_latent.to(exec_device).to(pipe.vae.dtype))[0]
         arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
         img_np = (arr * 255.0).round().clip(0, 255).astype("uint8")
         edited_image = Image.fromarray(img_np)
@@ -755,6 +791,95 @@ def reject_edit():
         
     except Exception as e:
         print(f"Error in reject_edit: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/upload_image', methods=['POST'])
+def upload_image():
+    """Upload and process an image using NTI (Null-Text Inversion)."""
+    try:
+        load_models()
+        
+        data = request.json
+        image_base64 = data.get('image')
+        prompt = data.get('prompt', 'A person wearing clothing')
+        session_id = data.get('session_id', str(uuid.uuid4()))
+        nti_seed = data.get('nti_seed')  # None means random
+        
+        if not image_base64:
+            return jsonify({"success": False, "error": "No image provided"}), 400
+        
+        # Convert base64 to PIL image
+        image = base64_to_image(image_base64)
+        
+        print(f"Processing uploaded image with NTI. Prompt: '{prompt}'")
+        print(f"Image size: {image.size}, mode: {image.mode}")
+        
+        # Resize image to 512x512 if needed
+        if image.size != (512, 512):
+            image = image.resize((512, 512), Image.Resampling.LANCZOS)
+            print(f"Resized image to 512x512")
+        
+        # Convert RGBA to RGB if needed
+        if image.mode == 'RGBA':
+            white_bg = Image.new('RGB', image.size, (255, 255, 255))
+            white_bg.paste(image, mask=image.split()[3])
+            image = white_bg
+            print("Converted RGBA to RGB with white background")
+        elif image.mode != 'RGB':
+            image = image.convert('RGB')
+            print(f"Converted {image.mode} to RGB")
+        
+        # Process with NTI module
+        print("Starting NTI processing...")
+        nti_result = process_nti(
+            image=image,
+            prompt=prompt,
+            pipe=pipe,
+            nti_seed=nti_seed,
+            max_iterations=150,
+            nti_timesteps=10,
+            preview=True,
+            time_limit_sec=300.0
+        )
+        
+        print(f"NTI completed. Best loss: {nti_result['metadata']['loss_best']:.6f}")
+        print(f"NTI time: {nti_result['metadata']['elapsed_sec']:.1f}s")
+        
+        # Store NTI results in session
+        if session_id not in sessions:
+            sessions[session_id] = {}
+        
+        sessions[session_id]['latent'] = nti_result['latent']  # Already in FP32 on CPU
+        sessions[session_id]['u_star'] = nti_result['u_star']   # NTI unconditional embedding
+        sessions[session_id]['prompt'] = prompt
+        sessions[session_id]['is_nti'] = True  # Flag to indicate this is from NTI
+        sessions[session_id]['nti_metadata'] = nti_result['metadata']
+        
+        # Convert preview image to base64
+        if nti_result['preview']:
+            image_base64 = image_to_base64(nti_result['preview'])
+        else:
+            # Fallback: decode the latent
+            exec_device = get_execution_device()
+            with torch.no_grad():
+                arr = pipe.decode_latents(nti_result['latent'].to(exec_device).to(pipe.vae.dtype))[0]
+            arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
+            img_np = (arr * 255.0).round().clip(0, 255).astype("uint8")
+            preview_image = Image.fromarray(img_np)
+            image_base64 = image_to_base64(preview_image)
+        
+        result = {
+            "success": True,
+            "image": image_base64,
+            "session_id": session_id,
+            "nti_metadata": nti_result['metadata']
+        }
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        print(f"Error in upload_image: {str(e)}")
+        traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
 if __name__ == '__main__':
