@@ -1,6 +1,9 @@
 # Image Editor UI
 
-An interactive web interface for the image editing system with scribble and add modes.
+An interactive web interface for the image editing system with scribble and add modes. In scribble mode, users will draw directly on the canvas, which will be inputted alongside a prompt to guide generation. In add mode, users draw bounding boxes around a region, which is passed with a prompt to generate the specified objects within the specified region.
+
+<img width="825" height="467" alt="Screenshot 2025-09-02 at 11 57 43 AM" src="https://github.com/user-attachments/assets/152eabe7-d637-4186-b6fe-86fc6b9aade7" />
+<img width="765" height="347" alt="Screenshot 2025-09-02 at 11 58 00 AM" src="https://github.com/user-attachments/assets/b2c9e23c-d337-47da-b998-a7045f04ec3c" />
 
 ## Architecture
 
